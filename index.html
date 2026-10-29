@@ -57,12 +57,12 @@ const save=()=>{try{localStorage.setItem('calm',JSON.stringify(S));saveErr=false
 const now=()=>new Date(),dk=(d=now())=>d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
 const fmt=t=>new Date(t).toLocaleString([], {dateStyle:'medium',timeStyle:'short'});
 const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,6);
-const TABS=[['therapy','🪷','Reflect'],['study','📚','Study'],['mind','🌙','Mind'],['disc','🎯','Discipline'],['fit','🌸','Fitness']];
-let cur='therapy';
+const TABS=[['ai','💬','Therapy'],['reflect','🪷','Reflect'],['study','📚','Study'],['mind','🌙','Mind'],['disc','🎯','Discipline'],['fit','🌸','Fitness']];
+let cur='ai';
 function go(t){cur=t;render()}
 function render(){
  $('#nav').innerHTML=TABS.map(([k,i,n])=>`<button class="${k==cur?'on':''}" onclick="go('${k}')"><b>${i}</b>${n}</button>`).join('');
- $('#main').innerHTML=V[cur]();window.scrollTo(0,0);
+ $('#main').innerHTML=V[cur]();window.scrollTo(0,0);if(cur=='ai')drawChat();
 }
 /* ---------- THERAPY ---------- */
 const EM=[['😞',2,'very low'],['😕',4,'low'],['😐',5,'neutral'],['🙂',7,'good'],['😄',9,'great']];
@@ -70,6 +70,46 @@ function setMood(i){S.mood={score:EM[i][1],label:EM[i][2],e:EM[i][0],d:dk()};sav
 function addRefl(){const g=i=>$('#'+i).value.trim();if(!g('r1')&&!g('r3'))return;S.refl.unshift({t:Date.now(),a:g('r1'),b:g('r2'),c:g('r3'),d:g('r4'),e:g('r5'),f:g('r6')});save();render()}
 function delRefl(i){if(confirm('Delete this reflection?')){S.refl.splice(i,1);save();render()}}
 const RQ=[['r1','What happened? (just the facts)'],['r2','What did you feel, and how strongly (0–100)?'],['r3','What thought went through your mind?'],['r4','What supports that thought?'],['r5','What doesn’t support it, or what would you tell a friend?'],['r6','A kinder, more balanced thought']];
+const SYS=`You are a warm, grounded, non-judgmental supportive therapist in a private journaling app. Use active listening, validation, gentle open-ended reflective questions, and CBT-informed techniques (identifying thoughts, feelings and behaviours, noticing cognitive distortions, reframing, behavioural experiments) when they fit. Keep replies fairly short (under 150 words), conversational, and ask at most one question at a time. Do not diagnose. You are not a replacement for a licensed professional. If the person mentions self-harm, suicide or being in danger, respond with care, encourage them to contact local emergency services or a crisis line and a trusted person right away. You only know what is said in this conversation.`;
+let busy=false;
+const wait=ms=>new Promise(r=>setTimeout(r,ms)),status=t=>{const e=$('#st');if(e)e.textContent=t};
+function drawChat(){const c=$('#chat');if(!c)return;c.innerHTML=(S.chat.length?'':'<div class="m assistant">Hi, I’m here and listening. What’s on your mind today?</div>')+S.chat.map(m=>`<div class="m ${m.role}">${esc(m.content)}</div>`).join('');c.scrollTop=c.scrollHeight}
+function shareMood(el){S.share=el.checked;save()}
+function newSession(){if(confirm('Start a fresh session? This clears the current conversation.')){S.chat=[];save();render()}}
+function setKey(){const k=prompt('Paste your Gemini API key (kept only in this browser):',localStorage.getItem('gemini_key')||'');if(k!==null)localStorage.setItem('gemini_key',k.trim())}
+function setModel(){const m=prompt('Main Gemini model name (see Google AI Studio):',localStorage.getItem('gemini_model')||'gemini-flash-latest');if(m)localStorage.setItem('gemini_model',m.trim());const b=prompt('Backup model, used when the main one is busy:',localStorage.getItem('gemini_backup')||'gemini-flash-lite-latest');if(b)localStorage.setItem('gemini_backup',b.trim())}
+async function callGemini(key,contents){
+ const models=[localStorage.getItem('gemini_model')||'gemini-flash-latest',localStorage.getItem('gemini_backup')||'gemini-flash-lite-latest'];
+ let last='Unknown error';
+ for(const model of models){
+  for(let a=0;a<3;a++){
+   let r,j;
+   try{
+    r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,{method:'POST',headers:{'Content-Type':'application/json','x-goog-api-key':key},body:JSON.stringify({systemInstruction:{parts:[{text:SYS}]},contents})});
+    j=await r.json().catch(()=>({}));
+   }catch(e){last='Network problem';status('Connection hiccup, retrying…');await wait(1500*(a+1));continue}
+   if(r.ok){const t=j.candidates&&j.candidates[0]&&j.candidates[0].content&&j.candidates[0].content.parts.map(p=>p.text).join('');if(t)return t;last='Empty response';break}
+   last=(j.error&&j.error.message)||('Error '+r.status);
+   if(r.status==400||r.status==401||r.status==403){const e=new Error(last);e.fatal=1;throw e}
+   if(r.status==404)break;
+   if(r.status==429||r.status>=500){status('Gemini is busy, retrying…');await wait(1500*(a+1));continue}
+   break;
+  }
+  status('Trying backup model…');
+ }
+ throw new Error(last);
+}
+async function send(){
+ const el=$('#in'),txt=el.value.trim();if(!txt||busy)return;
+ let key=localStorage.getItem('gemini_key');if(!key){setKey();key=localStorage.getItem('gemini_key');if(!key)return}
+ busy=true;el.value='';S.chat.push({role:'user',content:txt});save();drawChat();status('Thinking…');
+ const mood=S.share&&S.mood&&S.mood.d==dk()?`\n\n[Context from mood check-in: today I rate my mood ${S.mood.score}/10 (${S.mood.label}).]`:'';
+ const contents=S.chat.map(m=>({role:m.role=='assistant'?'model':'user',parts:[{text:m.content}]}));
+ contents[contents.length-1].parts[0].text+=mood;
+ try{const t=await callGemini(key,contents);S.chat.push({role:'assistant',content:t});save();status('')}
+ catch(e){S.chat.pop();save();el.value=txt;status('Couldn’t get a reply: '+e.message+(e.fatal?' (check your API key)':' Your message is kept, try again in a moment.'))}
+ busy=false;drawChat();
+}
 /* ---------- STUDY ---------- */
 const pct=()=>{const n=S.topics.length;return n?Math.round(S.topics.reduce((a,t)=>a+t.n+t.q+t.m,0)/(n*3)*100):0};
 function addTopic(){const t=$('#tt').value.trim();if(!t)return;S.topics.push({id:uid(),t,p:$('#tp').value,n:0,q:0,m:0});save();render()}
@@ -106,7 +146,13 @@ function delImg(id){S.board=S.board.filter(x=>x.id!=id);save();render()}
 /* ---------- VIEWS ---------- */
 const logCard=(k,title,ph,id,note)=>`<div class="card"><h2>${title}</h2><textarea id="${id}" placeholder="${ph}"></textarea><div class="row" style="margin-top:8px"><button onclick="addLog('${k}','${id}')">Save</button></div>${S[k].map((l,i)=>`<div class="item"><div><small style="color:var(--mut)">${fmt(l.t)}</small><div style="white-space:pre-wrap">${esc(l.x)}</div></div><button class="x" onclick="delLog('${k}',${i})">✕</button></div>`).join('')}<div class="priv">${note}</div></div>`;
 const V={
-therapy:()=>`<h1>Reflect</h1><p class="sub">A gentle, private space to untangle your thoughts.</p>
+ai:()=>`<h1>Therapy</h1><p class="sub">A quiet place to talk things through.</p>
+<div class="card"><div class="mood">${EM.map((e,i)=>`<button class="${S.mood&&S.mood.d==dk()&&S.mood.score==e[1]?'on':''}" onclick="setMood(${i})" title="${e[2]}">${e[0]}</button>`).join('')}</div>
+<label class="ck" style="margin-top:10px"><input type="checkbox" ${S.share?'checked':''} onchange="shareMood(this)"> Share today’s mood with my therapist</label></div>
+<div class="card"><div id="chat"></div><div id="st" class="sub" style="margin:8px 0 0;min-height:1.2em"></div><div class="row" style="margin-top:6px"><textarea id="in" style="flex:1;min-height:48px" placeholder="Write whatever feels true right now…" onkeydown="if(event.key=='Enter'&&!event.shiftKey){event.preventDefault();send()}"></textarea><button onclick="send()">Send</button></div>
+<div class="row" style="margin-top:8px"><button class="ghost" onclick="newSession()">New session</button><button class="ghost" onclick="setKey()">API key</button><button class="ghost" onclick="setModel()">Models</button></div>
+<div class="priv">🔒 Messages here are sent to Google’s Gemini API. The therapist only sees this conversation (plus your mood if you tick the box). Your Rage Diary, Distraction Log and everything else never leave your device. This is supportive AI, not a licensed professional. In a crisis, contact local emergency services or a crisis line.</div></div>`,
+reflect:()=>`<h1>Reflect</h1><p class="sub">A gentle, private space to untangle your thoughts.</p>
 <div class="card"><h2>How are you feeling today?</h2><div class="mood">${EM.map((e,i)=>`<button class="${S.mood&&S.mood.d==dk()&&S.mood.score==e[1]?'on':''}" onclick="setMood(${i})" title="${e[2]}">${e[0]}</button>`).join('')}</div></div>
 <div class="card"><h2>New reflection</h2>${RQ.map(([i,q])=>`<p style="margin:10px 0 4px"><b>${q}</b></p><textarea id="${i}"></textarea>`).join('')}<div class="row" style="margin-top:10px"><button onclick="addRefl()">Save reflection</button></div>
 <div class="priv">🔒 Stays on this device only. This is a self-help tool, not therapy. If you feel unsafe or in crisis, please contact local emergency services, a crisis line, or someone you trust right away.</div></div>
